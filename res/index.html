@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Remarkable Canvas</title>
+    <meta charset="UTF-8">
+</head>
+<body>
+
+<label>Address: <input type="text" id="address" value="192.168.1.41:4444"></label>
+<button onclick="connect()">Connect</button>
+<div>Status:
+    <div id="status" style="display: inline">not yet connected</div>
+</div>
+<hr>
+<div style="position: relative; width: 1872px; height: 1404px;border: 1px solid #aaa">
+    <canvas width="1872" height="1404" style="position: absolute; left: 0;top: 0" id="canvas"></canvas>
+</div>
+
+<script src="index.js"></script>
+</body>
+</html>
