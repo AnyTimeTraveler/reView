@@ -1,168 +1,185 @@
-extern crate memreader;
+mod utils;
 
-use std::io::Read;
-use std::iter::Enumerate;
-use std::slice::Iter;
-use std::thread;
-use std::time::SystemTime;
-
-use memreader::{MemReader, ProvidesSlices};
-use sysinfo::{ProcessExt, RefreshKind, System, SystemExt};
-use ws::{listen, Message};
+use futures_util::future::{select, Either};
+use futures_util::{SinkExt, StreamExt};
+use log::*;
+use std::net::SocketAddr;
+use std::time::{Duration, SystemTime};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::{accept_async, tungstenite::Error};
+use tungstenite::{Message, Result};
+use memreader::MemReader;
 
 // const PIXEL_FORMAT: &str = "gray8";
-const WIDTH: usize = 1872;
-const HEIGHT: usize = 1404;
-const BYTES_PER_PIXEL: usize = 1;
-const WINDOW_BYTES: usize = WIDTH * HEIGHT * BYTES_PER_PIXEL;
+pub const WIDTH: usize = 1872;
+pub const HEIGHT: usize = 1404;
+pub const BYTES_PER_PIXEL: usize = 1;
+pub const WINDOW_BYTES: usize = WIDTH * HEIGHT * BYTES_PER_PIXEL;
 
-fn main() {
-    println!("Listening...");
-    listen("0.0.0.0:4444", |out| {
-        println!("Windowsize: {}", WINDOW_BYTES);
+async fn accept_connection(peer: SocketAddr, stream: TcpStream) {
+    if let Err(e) = handle_connection(peer, stream).await {
+        match e {
+            Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
+            err => error!("Error processing connection: {}", err),
+        }
+    }
+}
 
-        let pid = get_pid().unwrap();
+async fn handle_connection(peer: SocketAddr, stream: TcpStream) -> Result<()> {
+    let ws_stream = accept_async(stream).await.expect("Failed to accept");
+    info!("New WebSocket connection: {}", peer);
+    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+    let mut interval = tokio::time::interval(Duration::from_millis(1000));
 
-        println!("Pid: {}", pid);
+    // Echo incoming WebSocket messages and send a message periodically every second.
 
-        let fb0_addr = get_fb0addr(pid).unwrap();
+    let mut msg_fut = ws_receiver.next();
+    let mut tick_fut = interval.next();
+    loop {
+        match select(msg_fut, tick_fut).await {
+            Either::Left((msg, tick_fut_continue)) => {
+                match msg {
+                    Some(msg) => {
+                        let msg = msg?;
+                        if msg.is_text() || msg.is_binary() {
+                            ws_sender.send(msg).await?;
+                        } else if msg.is_close() {
+                            break;
+                        }
+                        tick_fut = tick_fut_continue; // Continue waiting for tick.
+                        msg_fut = ws_receiver.next(); // Receive next WebSocket message.
+                    }
+                    None => break, // WebSocket stream terminated.
+                };
+            }
+            Either::Right((_, msg_fut_continue)) => {
+                println!("In Thread");
+                println!("Windowsize: {}", WINDOW_BYTES);
 
-        println!("FB0: 0x{:X}", fb0_addr);
-        println!("FB0: {}", fb0_addr);
+                let pid = utils::get_pid().unwrap();
 
-        let reader = MemReader::new(pid as u32).unwrap();
+                println!("Pid: {}", pid);
 
-        let mut buf_a = [0u8; WINDOW_BYTES];
-        let mut buf_b = [0u8; WINDOW_BYTES];
+                let fb0_addr = utils::get_fb0addr(pid).unwrap();
 
-        let mut use_buffer_a = true;
+                println!("FB0: 0x{:X}", fb0_addr);
+                println!("FB0: {}", fb0_addr);
 
-        println!("Before Thread");
-        thread::spawn(move || {
-            println!("In Thread");
-            loop {
-                let start_begin = SystemTime::now();
+                let reader = MemReader::new(pid as u32).unwrap();
 
-                if use_buffer_a {
-                    fill_buffer(fb0_addr, &reader, &mut buf_a)
-                } else {
-                    fill_buffer(fb0_addr, &reader, &mut buf_b)
-                }.unwrap();
-                let read_time = start_begin.elapsed().unwrap().as_millis();
+                let mut buf_a = [0u8; WINDOW_BYTES];
+                let mut buf_b = [0u8; WINDOW_BYTES];
 
-                let start = SystemTime::now();
-                let equal = check_equality(&buf_a, &buf_b);
-                let cmp_time = start.elapsed().unwrap().as_millis();
-                print!("Equality: {}  ", equal);
-                let start = SystemTime::now();
-                if !equal {
-                    let encoded = if use_buffer_a {
-                        encode(&buf_a, WIDTH)
+                let mut use_buffer_a = true;
+
+                loop {
+                    let start_begin = SystemTime::now();
+
+                    if use_buffer_a {
+                        utils::fill_buffer(fb0_addr, &reader, &mut buf_a)
                     } else {
-                        encode(&buf_b, WIDTH)
-                    };
+                        utils::fill_buffer(fb0_addr, &reader, &mut buf_b)
+                    }.unwrap();
+                    let read_time = start_begin.elapsed().unwrap().as_millis();
 
-                    out.send(Message::Binary(encoded)).unwrap();
+                    let start = SystemTime::now();
+                    let equal = utils::check_equality(&buf_a, &buf_b);
+                    let cmp_time = start.elapsed().unwrap().as_millis();
+                    print!("Equality: {}  ", equal);
+                    let start = SystemTime::now();
+                    if !equal {
+                        let encoded = if use_buffer_a {
+                            utils::encode(&buf_a, WIDTH)
+                        } else {
+                            utils::encode(&buf_b, WIDTH)
+                        };
+
+                        ws_sender.send(Message::Binary(encoded)).await.unwrap();
+                    }
+
+                    let enc_time = start.elapsed().unwrap().as_millis();
+
+                    // println!("Read: {}", check_equality(&buf_a, &buf_b));
+
+                    use_buffer_a = !use_buffer_a;
+                    println!("Read: {:>3} ms, Cmp: {:>3} ms, Enc: {:>3} ms, All: {:>3} ms", read_time, cmp_time, enc_time, start_begin.elapsed().unwrap().as_millis());
                 }
-
-                let enc_time = start.elapsed().unwrap().as_millis();
-
-                // println!("Read: {}", check_equality(&buf_a, &buf_b));
-
-                use_buffer_a = !use_buffer_a;
-                println!("Read: {:>3} ms, Cmp: {:>3} ms, Enc: {:>3} ms, All: {:>3} ms", read_time, cmp_time, enc_time, start_begin.elapsed().unwrap().as_millis());
-            }
-        });
-        move |msg| {
-            println!("Got: {}", msg);
-            Ok(())
-        }
-    }).unwrap();
-    println!("Exiting!");
-
-    // println!("{} bytes at location {} in process {}'s memory", WINDOW_BYTES, fb0_addr, pid);
-}
-
-fn check_equality(buf_a: &[u8], buf_b: &[u8]) -> bool {
-    for i in 0..WINDOW_BYTES {
-        if buf_a[i] != buf_b[i] {
-            println!("Unequal: {}", i);
-            return false;
-        }
-    }
-    return true;
-}
-
-fn fill_buffer(fb0_addr: usize, reader: &MemReader, buf: &mut [u8]) -> std::io::Result<()> {
-    reader.address_slice_len(fb0_addr, WINDOW_BYTES).read_exact(buf)
-}
-
-fn get_pixel_frequency(buf: &mut Vec<u8>) {
-    let mut pixels = [0usize; 256];
-    for x in buf {
-        pixels[*x as usize] += 1;
-    }
-
-    for (value, count) in pixels.iter().enumerate() {
-        if *count > 0 {
-            if *count > 1024 * 1024 {
-                println!("{:>3} has {:>3}.{:03}.{:03} mB", value, count / (1024 * 1024), (count % (1024 * 1024)) / 1024, count % (1024));
-            } else if *count > 1024 {
-                println!("{:>3} has     {:>3}.{:03} kB", value, count / 1024, count % 1024);
-            } else {
-                println!("{:>3} has         {:>3} bytes", value, count);
+                // ws_sender.send(Message::Binary(vec![])).await?;
+                msg_fut = msg_fut_continue; // Continue receiving the WebSocket message.
+                tick_fut = interval.next(); // Wait for next tick.
             }
         }
     }
+
+    Ok(())
 }
 
-fn get_pid() -> Option<i32> {
-    System::new_with_specifics(RefreshKind::new().with_processes()).get_process_by_name("xochitl").iter()
-        .map(|process| process.pid())
-        .next()
-}
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() {
+    let addr = "0.0.0.0:4444";
+    let listener = TcpListener::bind(&addr).await.expect("Can't listen");
+    info!("Listening on: {}", addr);
 
-fn get_fb0addr(pid: i32) -> Option<usize> {
-    proc_maps::get_process_maps(pid).unwrap().iter()
-        .filter(|item| if let Some(name) = item.filename() {
-            name == "/dev/fb0"
-        } else { false })
-        .map(|item| {
-            println!("{:?}", item);
-            item.size() + item.start()
-        })
-        .next()
-}
+    while let Ok((stream, _)) = listener.accept().await {
+        let peer = stream
+            .peer_addr()
+            .expect("connected streams should have a peer address");
+        info!("Peer address: {}", peer);
 
-fn encode(original: &[u8], width: usize) -> Vec<u8> {
-    let mut result = Vec::new();
-
-    let mut iter = original.iter().enumerate();
-
-    while let Some((i, pixel)) = iter.next() {
-        let h = i / width;
-        let w = i % width;
-
-        if *pixel < 255 {
-            let mut vec = encode_pixel_row(h as u16, w as u16, &mut iter);
-            result.append(&mut vec);
-        }
+        tokio::spawn(accept_connection(peer, stream));
     }
-
-    result
 }
 
-fn encode_pixel_row(start_h: u16, start_w: u16, iter: &mut Enumerate<Iter<u8>>) -> Vec<u8> {
-    let mut data: Vec<u8> = Vec::new();
-    data.push((start_h >> 8) as u8);
-    data.push((start_h & 255) as u8);
-    data.push((start_w >> 8) as u8);
-    data.push((start_w & 255) as u8);
-    while let Some((_, pixel)) = iter.next() {
-        if *pixel == 255 { break; }
-        data.push(*pixel);
-    }
-    data.push(255);
-
-    data
-}
+// async fn run(sender: &mut dyn SinkExt<Message>){
+//     println!("In Thread");
+//     println!("Windowsize: {}", WINDOW_BYTES);
+//
+//     let pid = utils::get_pid().unwrap();
+//
+//     println!("Pid: {}", pid);
+//
+//     let fb0_addr = utils::get_fb0addr(pid).unwrap();
+//
+//     println!("FB0: 0x{:X}", fb0_addr);
+//     println!("FB0: {}", fb0_addr);
+//
+//     let reader = MemReader::new(pid as u32).unwrap();
+//
+//     let mut buf_a = [0u8; WINDOW_BYTES];
+//     let mut buf_b = [0u8; WINDOW_BYTES];
+//
+//     let mut use_buffer_a = true;
+//
+//     loop {
+//         let start_begin = SystemTime::now();
+//
+//         if use_buffer_a {
+//             utils::fill_buffer(fb0_addr, &reader, &mut buf_a)
+//         } else {
+//             utils::fill_buffer(fb0_addr, &reader, &mut buf_b)
+//         }.unwrap();
+//         let read_time = start_begin.elapsed().unwrap().as_millis();
+//
+//         let start = SystemTime::now();
+//         let equal = utils::check_equality(&buf_a, &buf_b);
+//         let cmp_time = start.elapsed().unwrap().as_millis();
+//         print!("Equality: {}  ", equal);
+//         let start = SystemTime::now();
+//         if !equal {
+//             let encoded = if use_buffer_a {
+//                 utils::encode(&buf_a, WIDTH)
+//             } else {
+//                 utils::encode(&buf_b, WIDTH)
+//             };
+//
+//             sender.send(Message::Binary(encoded)).unwrap();
+//         }
+//
+//         let enc_time = start.elapsed().unwrap().as_millis();
+//
+//         // println!("Read: {}", check_equality(&buf_a, &buf_b));
+//
+//         use_buffer_a = !use_buffer_a;
+//         println!("Read: {:>3} ms, Cmp: {:>3} ms, Enc: {:>3} ms, All: {:>3} ms", read_time, cmp_time, enc_time, start_begin.elapsed().unwrap().as_millis());
+//     }
+// }
