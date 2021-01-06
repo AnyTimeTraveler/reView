@@ -1,21 +1,113 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <title>Remarkable Canvas</title>
-    <meta charset="UTF-8">
-</head>
-<body>
 
-<label>Address: <input type="text" id="address" value="192.168.1.41:4444"></label>
-<button onclick="connect()">Connect</button>
-<div>Status:
-    <div id="status" style="display: inline">not yet connected</div>
+<head>
+  <title>ReMarkable Canvas</title>
+  <meta charset="UTF-8">
+  <style>
+      #container {
+          position: relative;
+          border: 1px solid #aaa;
+      }
+
+      .normal {
+          width: 1176px;
+          height: 750px;
+      }
+
+      .rotated {
+          width: 750px;
+          height: 1176px;
+      }
+
+      .border {
+          border: 1px solid black;
+      }
+  </style>
+</head>
+
+<body>
+<div style="display: flex; flex-direction: row; flex-wrap: nowrap">
+  <div>
+    <label>Address: <input type="text" id="address"></label>
+    <button onclick="connect()">Connect</button>
+    <div>Status:
+      <div id="status" style="display: inline">Not yet connected</div>
+    </div>
+  </div>
 </div>
 <hr>
-<div style="position: relative; width: 1872px; height: 1404px;border: 1px solid #aaa">
-    <canvas width="1872" height="1404" style="position: absolute; left: 0;top: 0" id="canvas"></canvas>
+<div id="container" class="normal">
+  <canvas width="1176" height="750" style="position: absolute; left: 0;top: 0" class="border"
+          id="canvas-overlay"></canvas>
+  <canvas width="1176" height="750" style="position: absolute; left: 0;top: 0" class="border" id="canvas"></canvas>
 </div>
+<p>Enter to rotate canvas, Space to clear screen</p>
 
-<script src="index.js"></script>
+<script>
+    // Found by finding the maximum values when experimenting
+    const MAX_W = 1872;
+    const MAX_H = 1404;
+
+    // landscape / portrait
+    let rotate = false;
+
+    let canvas = document.getElementById("canvas");
+    let ctx = canvas.getContext("2d");
+
+    function connect() {
+        let address = document.getElementById("address").value;
+
+        document.getElementById("status").textContent = "connecting...";
+        console.log("Attempting to connect to ws://" + address);
+        let websocket;
+        try {
+            websocket = new WebSocket("ws://" + address);
+        } catch (e) {
+            document.getElementById("status").textContent = "Error";
+        }
+
+        websocket.onopen = function () {
+            console.log("Connected");
+            document.getElementById("status").textContent = "Connected";
+        }
+
+        websocket.onerror = function () {
+            console.log("Error");
+            document.getElementById("status").textContent = "Error";
+        }
+
+        websocket.onclose = function () {
+            console.log("Disconnected");
+            if (document.getElementById("status").textContent !== "Error") {
+                document.getElementById("status").textContent = "Disconnected";
+            }
+        }
+
+        websocket.binaryType = "arraybuffer";
+
+        websocket.onmessage = function (event) {
+            const data = event.data;
+            console.log(data);
+            const dv = new DataView(data);
+            canvas.dataset = null;
+            let image_data = ctx.createImageData(MAX_W, MAX_W);
+
+            for (let i = 0; i < dv.byteLength; i++) {
+                let h = dv.getUint16(i);
+                i += 2;
+                let w = dv.getUint16(i);
+                i += 2;
+                for (; dv.getUint8(i) !== 255; i++) {
+                    image_data[h * MAX_W + w] = dv.getUint8(i);
+                }
+            }
+        };
+    }
+
+    document.getElementById("address").value = window.location.hostname + ":4444";
+    connect();
+</script>
 </body>
+
 </html>

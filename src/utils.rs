@@ -1,9 +1,19 @@
-use crate::WINDOW_BYTES;
-use memreader::{MemReader, ProvidesSlices};
 use std::io::Read;
-use sysinfo::{RefreshKind, System, SystemExt, ProcessExt};
-use std::slice::Iter;
 use std::iter::Enumerate;
+use std::slice::Iter;
+use std::sync::mpsc::SyncSender;
+use std::thread::sleep;
+use std::time::{Duration, SystemTime};
+
+use memreader::{MemReader, ProvidesSlices};
+use sysinfo::{ProcessExt, RefreshKind, System, SystemExt};
+use ws::Message;
+
+const PIXEL_FORMAT: &str = "gray8";
+pub const WIDTH: usize = 1872;
+pub const HEIGHT: usize = 1404;
+pub const BYTES_PER_PIXEL: usize = 1;
+pub const WINDOW_BYTES: usize = WIDTH * HEIGHT * BYTES_PER_PIXEL;
 
 pub(crate) fn check_equality(buf_a: &[u8], buf_b: &[u8]) -> bool {
     for i in 0..WINDOW_BYTES {
@@ -19,6 +29,7 @@ pub(crate) fn fill_buffer(fb0_addr: usize, reader: &MemReader, buf: &mut [u8]) -
     reader.address_slice_len(fb0_addr, WINDOW_BYTES).read_exact(buf)
 }
 
+#[allow(unused)]
 fn get_pixel_frequency(buf: &mut Vec<u8>) {
     let mut pixels = [0usize; 256];
     for x in buf {
@@ -87,4 +98,61 @@ fn encode_pixel_row(start_h: u16, start_w: u16, iter: &mut Enumerate<Iter<u8>>) 
     data.push(255);
 
     data
+}
+
+use crate::chanel;
+pub(crate) fn encode_loop() {
+    println!("In Thread");
+    println!("Windowsize: {}", WINDOW_BYTES);
+
+    let pid = get_pid().unwrap();
+
+    println!("Pid: {}", pid);
+
+    let fb0_addr = get_fb0addr(pid).unwrap();
+
+    println!("FB0: 0x{:X}", fb0_addr);
+    println!("FB0: {}", fb0_addr);
+
+    let reader = MemReader::new(pid as u32).unwrap();
+
+    let mut buf_a = [0u8; WINDOW_BYTES];
+    let mut buf_b = [0u8; WINDOW_BYTES];
+
+    let mut use_buffer_a = true;
+
+    loop {
+        let start_begin = SystemTime::now();
+
+        if use_buffer_a {
+            fill_buffer(fb0_addr, &reader, &mut buf_a)
+        } else {
+            fill_buffer(fb0_addr, &reader, &mut buf_b)
+        }.unwrap();
+        let read_time = start_begin.elapsed().unwrap().as_millis();
+
+        let start = SystemTime::now();
+        let equal = check_equality(&buf_a, &buf_b);
+        let cmp_time = start.elapsed().unwrap().as_millis();
+        print!("Equality: {}  ", equal);
+        let start = SystemTime::now();
+        if !equal {
+            let encoded = if use_buffer_a {
+                encode(&buf_a, WIDTH)
+            } else {
+                encode(&buf_b, WIDTH)
+            };
+
+            chanel.0.send(Message::Binary(encoded)).unwrap();
+        } else {
+            sleep(Duration::from_millis(50));
+        }
+
+        let enc_time = start.elapsed().unwrap().as_millis();
+
+        // println!("Read: {}", check_equality(&buf_a, &buf_b));
+
+        use_buffer_a = !use_buffer_a;
+        println!("Read: {:>3} ms, Cmp: {:>3} ms, Enc: {:>3} ms, All: {:>3} ms", read_time, cmp_time, enc_time, start_begin.elapsed().unwrap().as_millis());
+    }
 }
