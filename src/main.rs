@@ -19,7 +19,7 @@ mod utils;
 struct Asset;
 
 lazy_static! {
-    pub static ref chanel : (SyncSender<Message>, Arc<Mutex<Receiver<Message>>>) = make_things();
+    pub static ref CHANNEL : (SyncSender<Message>, Arc<Mutex<Receiver<Message>>>) = make_things();
 }
 
 fn make_things() -> (SyncSender<Message>, Arc<Mutex<Receiver<Message>>>) {
@@ -39,9 +39,9 @@ fn main() {
     });
 
     thread::spawn(move || {
-        println!("Listening for websocket connections on port 55555...");
+        println!("Listening for websocket connections on port 4444...");
         listen("0.0.0.0:4444", |out| {
-            let a = &chanel.1;
+            let a = &CHANNEL.1;
             thread::Builder::new()
                 .name(format!("connection_handler_{}", out.connection_id()))
                 .spawn(move || {

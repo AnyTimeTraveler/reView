@@ -11,13 +11,13 @@
       }
 
       .normal {
-          width: 1176px;
-          height: 750px;
+          width: 1404px;
+          height: 1872px;
       }
 
       .rotated {
-          width: 750px;
-          height: 1176px;
+          width: 1404px;
+          height: 1872px;
       }
 
       .border {
@@ -38,16 +38,16 @@
 </div>
 <hr>
 <div id="container" class="normal">
-  <canvas width="1176" height="750" style="position: absolute; left: 0;top: 0" class="border"
+  <canvas width="1404" height="1872" style="position: absolute; left: 0;top: 0" class="border"
           id="canvas-overlay"></canvas>
-  <canvas width="1176" height="750" style="position: absolute; left: 0;top: 0" class="border" id="canvas"></canvas>
+  <canvas width="1404" height="1872" style="position: absolute; left: 0;top: 0" class="border" id="canvas"></canvas>
 </div>
 <p>Enter to rotate canvas, Space to clear screen</p>
 
 <script>
     // Found by finding the maximum values when experimenting
-    const MAX_W = 1872;
-    const MAX_H = 1404;
+    const MAX_H = 1872;
+    const MAX_W = 1404;
 
     // landscape / portrait
     let rotate = false;
@@ -99,9 +99,17 @@
                 let w = dv.getUint16(i);
                 i += 2;
                 for (; dv.getUint8(i) !== 255; i++) {
-                    image_data[h * MAX_W + w] = dv.getUint8(i);
+                    console.log("a");
+                    let uint8 = dv.getUint8(i);
+                    // noinspection PointlessArithmeticExpressionJS
+                    image_data[(h * MAX_W + w) *4 + 0] = uint8;
+                    image_data[(h * MAX_W + w) *4 + 1] = uint8;
+                    image_data[(h * MAX_W + w) *4 + 2] = uint8;
+                    image_data[(h * MAX_W + w) *4 + 3] = 255;
                 }
             }
+            console.log("b");
+            ctx.putImageData(image_data, 0, 0);
         };
     }
 

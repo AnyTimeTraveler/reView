@@ -1,7 +1,6 @@
 use std::io::Read;
 use std::iter::Enumerate;
 use std::slice::Iter;
-use std::sync::mpsc::SyncSender;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
@@ -9,6 +8,9 @@ use memreader::{MemReader, ProvidesSlices};
 use sysinfo::{ProcessExt, RefreshKind, System, SystemExt};
 use ws::Message;
 
+use crate::CHANNEL;
+
+#[allow(unused)]
 const PIXEL_FORMAT: &str = "gray8";
 pub const WIDTH: usize = 1872;
 pub const HEIGHT: usize = 1404;
@@ -18,7 +20,7 @@ pub const WINDOW_BYTES: usize = WIDTH * HEIGHT * BYTES_PER_PIXEL;
 pub(crate) fn check_equality(buf_a: &[u8], buf_b: &[u8]) -> bool {
     for i in 0..WINDOW_BYTES {
         if buf_a[i] != buf_b[i] {
-            println!("Unequal: {}", i);
+            // println!("Unequal: {}", i);
             return false;
         }
     }
@@ -30,7 +32,7 @@ pub(crate) fn fill_buffer(fb0_addr: usize, reader: &MemReader, buf: &mut [u8]) -
 }
 
 #[allow(unused)]
-fn get_pixel_frequency(buf: &mut Vec<u8>) {
+fn get_pixel_frequency(buf: &[u8]) {
     let mut pixels = [0usize; 256];
     for x in buf {
         pixels[*x as usize] += 1;
@@ -67,17 +69,14 @@ pub(crate) fn get_fb0addr(pid: i32) -> Option<usize> {
         .next()
 }
 
-pub(crate) fn encode(original: &[u8], width: usize) -> Vec<u8> {
+pub(crate) fn encode(original: &[u8]) -> Vec<u8> {
     let mut result = Vec::new();
 
     let mut iter = original.iter().enumerate();
 
     while let Some((i, pixel)) = iter.next() {
-        let h = i / width;
-        let w = i % width;
-
         if *pixel < 255 {
-            let mut vec = encode_pixel_row(h as u16, w as u16, &mut iter);
+            let mut vec = encode_pixel_row(i as u32, &mut iter);
             result.append(&mut vec);
         }
     }
@@ -85,12 +84,11 @@ pub(crate) fn encode(original: &[u8], width: usize) -> Vec<u8> {
     result
 }
 
-fn encode_pixel_row(start_h: u16, start_w: u16, iter: &mut Enumerate<Iter<u8>>) -> Vec<u8> {
+fn encode_pixel_row(start_pos: u32, iter: &mut Enumerate<Iter<u8>>) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
-    data.push((start_h >> 8) as u8);
-    data.push((start_h & 255) as u8);
-    data.push((start_w >> 8) as u8);
-    data.push((start_w & 255) as u8);
+    data.push((start_pos >> 16) as u8);
+    data.push((start_pos >> 8) as u8);
+    data.push(start_pos as u8);
     while let Some((_, pixel)) = iter.next() {
         if *pixel == 255 { break; }
         data.push(*pixel);
@@ -100,10 +98,9 @@ fn encode_pixel_row(start_h: u16, start_w: u16, iter: &mut Enumerate<Iter<u8>>) 
     data
 }
 
-use crate::chanel;
 pub(crate) fn encode_loop() {
     println!("In Thread");
-    println!("Windowsize: {}", WINDOW_BYTES);
+    println!("Windowsize: {}k", WINDOW_BYTES / 1024);
 
     let pid = get_pid().unwrap();
 
@@ -124,11 +121,7 @@ pub(crate) fn encode_loop() {
     loop {
         let start_begin = SystemTime::now();
 
-        if use_buffer_a {
-            fill_buffer(fb0_addr, &reader, &mut buf_a)
-        } else {
-            fill_buffer(fb0_addr, &reader, &mut buf_b)
-        }.unwrap();
+        fill_buffer(fb0_addr, &reader, if use_buffer_a { &mut buf_a } else { &mut buf_b }).unwrap();
         let read_time = start_begin.elapsed().unwrap().as_millis();
 
         let start = SystemTime::now();
@@ -136,23 +129,22 @@ pub(crate) fn encode_loop() {
         let cmp_time = start.elapsed().unwrap().as_millis();
         print!("Equality: {}  ", equal);
         let start = SystemTime::now();
-        if !equal {
-            let encoded = if use_buffer_a {
-                encode(&buf_a, WIDTH)
-            } else {
-                encode(&buf_b, WIDTH)
-            };
-
-            chanel.0.send(Message::Binary(encoded)).unwrap();
+        let encoded_size;
+        let enc_time = if !equal {
+            let encoded = encode(if use_buffer_a { &buf_a } else { &buf_b });
+            encoded_size = encoded.len();
+            CHANNEL.0.send(Message::Binary(encoded)).unwrap();
+            // get_pixel_frequency(if use_buffer_a { &buf_a } else { &buf_b });
+            start.elapsed().unwrap().as_millis()
         } else {
             sleep(Duration::from_millis(50));
-        }
-
-        let enc_time = start.elapsed().unwrap().as_millis();
+            encoded_size = 0;
+            0
+        };
 
         // println!("Read: {}", check_equality(&buf_a, &buf_b));
 
         use_buffer_a = !use_buffer_a;
-        println!("Read: {:>3} ms, Cmp: {:>3} ms, Enc: {:>3} ms, All: {:>3} ms", read_time, cmp_time, enc_time, start_begin.elapsed().unwrap().as_millis());
+        println!("Size: {:>3}k Read: {:>3} ms, Cmp: {:>3} ms, Enc: {:>3} ms, All: {:>3} ms", encoded_size / 1024, read_time, cmp_time, enc_time, read_time + cmp_time + enc_time);
     }
 }
